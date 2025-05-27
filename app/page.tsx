@@ -5,6 +5,7 @@ function App() {
   const [urlParam, setUrlParam] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [pageContent, setPageContent] = useState<string | null>(null);
+  const [timeForRendering, setTimeForRendering] = useState<number | null>(null);
   const contentRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -16,6 +17,7 @@ function App() {
   const processWithGemini = async (htmlContent: string) => {
     setStatusMessage("Processing with AI...");
     try {
+      const startTime = performance.now();
       const response = await fetch("/api/gemini", {
         method: "POST",
         headers: {
@@ -37,6 +39,9 @@ function App() {
         if (data.modifiedContent) {
           setPageContent(data.modifiedContent);
           setStatusMessage("Success: AI processing complete.");
+          const endTime = performance.now();
+          const seconds = (endTime - startTime) / 1000;
+          setTimeForRendering(seconds);
         } else {
           setPageContent(htmlContent);
           setStatusMessage(
@@ -92,6 +97,7 @@ function App() {
     <>
       {urlParam && <p>Requesting content for: {urlParam}</p>}
       {statusMessage && <p>Status: {statusMessage}</p>}
+      {timeForRendering && <p>Time for rendering: {timeForRendering}</p>}
       {pageContent && (
         <div
           ref={contentRef}

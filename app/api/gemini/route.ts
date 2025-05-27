@@ -1,11 +1,65 @@
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import { Groq } from "groq-sdk";
 import { NextResponse } from "next/server";
 import { parse } from "node-html-parser";
 
+// Function to estimate token count (rough approximation)
+function estimateTokenCount(text: string): number {
+  // A rough approximation: 1 token ≈ 4 characters for English text
+  return Math.ceil(text.length / 4);
+}
+
+// Model configuration
+const MODEL_CONFIG = {
+  model: "llama-3.1-8b-instant",
+  temperature: 0.1,
+  max_completion_tokens: 25192,
+  top_p: 0.1,
+  stream: false,
+};
+
+// Retry configuration
+const MAX_RETRIES = 3;
+const RETRY_DELAY = 1000; // 1 second
+
+async function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function generateWithRetry(
+  groq: Groq,
+  prompt: string,
+  retries = MAX_RETRIES
+): Promise<string> {
+  try {
+    const startTime = performance.now();
+    const chatCompletion = await groq.chat.completions.create({
+      messages: [{ role: "user", content: prompt }],
+      ...MODEL_CONFIG,
+    });
+    const endTime = performance.now();
+
+    console.log(
+      `Generation completed in ${(endTime - startTime).toFixed(2)}ms`
+    );
+
+    if ("choices" in chatCompletion) {
+      return chatCompletion.choices[0]?.message?.content || "";
+    }
+    throw new Error("Unexpected response format from Groq");
+  } catch (error) {
+    if (retries > 0 && error instanceof Error) {
+      console.warn(`Generation failed, retrying... (${retries} attempts left)`);
+      await sleep(RETRY_DELAY);
+      return generateWithRetry(groq, prompt, retries - 1);
+    }
+    throw error;
+  }
+}
+
 export async function POST(request: Request) {
-  const apiKey = process.env.GEMINI_API_KEY;
+  const apiKey = process.env.GROQ_API_KEY;
   if (!apiKey) {
-    console.error("GEMINI_API_KEY environment variable not set.");
+    console.error("GROQ_API_KEY environment variable not set.");
     return NextResponse.json(
       { error: "API key not configured" },
       { status: 500 }
@@ -23,14 +77,10 @@ export async function POST(request: Request) {
       );
     }
 
-    // Initialize Gemini client
-    const genAI = new GoogleGenerativeAI(apiKey);
-    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" }); // Updated model name
-
+    // Calculate token count before making the API call
     const prompt = `
       Take the following HTML content and create a minimalist black and white design:
       - Remove all images and unnecessary visual elements
-      - Use only black (#000) and white (#fff) colors
       - Keep the core text content and structure
       - Simplify the layout and styling
       - Add clean typography and spacing
@@ -43,15 +93,20 @@ export async function POST(request: Request) {
       Minimalist HTML:
     `;
 
-    console.log("Sending prompt to Gemini...");
-    // Generate content
-    const result = await model.generateContent(prompt);
-    const response = await result.response;
-    const geminiModifiedContent = response.text();
-    console.log("Received response from Gemini.");
+    const estimatedTokens = estimateTokenCount(prompt);
+    console.log(`Estimated token count: ${estimatedTokens}`);
 
-    if (!geminiModifiedContent) {
-      console.warn("Gemini returned empty content.");
+    // Initialize Groq client with performance logging
+    console.time("Groq initialization");
+    const groq = new Groq({ apiKey });
+    console.timeEnd("Groq initialization");
+
+    console.log("Sending prompt to Groq...");
+    const groqModifiedContent = await generateWithRetry(groq, prompt);
+    console.log("Received response from Groq.");
+
+    if (!groqModifiedContent) {
+      console.warn("Groq returned empty content.");
       return NextResponse.json(
         { error: "AI failed to generate content" },
         { status: 500 }
@@ -59,8 +114,9 @@ export async function POST(request: Request) {
     }
 
     // --- Start Link Rewriting ---
+    console.time("Link rewriting");
     console.log("Rewriting links relative to:", originalUrl);
-    const root = parse(geminiModifiedContent);
+    const root = parse(groqModifiedContent);
     const anchors = root.querySelectorAll("a");
 
     // Ensure originalUrl has a protocol for URL constructor
@@ -77,9 +133,8 @@ export async function POST(request: Request) {
       new URL(baseUrl);
     } catch (e) {
       console.error("Invalid originalUrl provided:", originalUrl, e);
-      // Handle error - maybe return unmodified content or an error response
       return NextResponse.json({
-        modifiedContent: geminiModifiedContent,
+        modifiedContent: groqModifiedContent,
         warning: "Could not parse originalUrl to rewrite links.",
       });
     }
@@ -88,28 +143,24 @@ export async function POST(request: Request) {
       const href = anchor.getAttribute("href");
       if (href && !href.startsWith("javascript:") && !href.startsWith("#")) {
         try {
-          // Resolve the link relative to the original URL's base
           const absoluteUrl = new URL(href, baseUrl).toString();
-          // Rewrite the href to use the application's routing
           anchor.setAttribute(
             "href",
             `/?_url=${encodeURIComponent(absoluteUrl)}`
           );
         } catch (error) {
           console.warn(`Could not process or resolve href: ${href}`, error);
-          // Optional: remove the href or the anchor if it's invalid
-          // anchor.removeAttribute('href');
         }
       }
     });
 
     const finalHtmlContent = root.toString();
+    console.timeEnd("Link rewriting");
     // --- End Link Rewriting ---
 
-    // Return the modified content with rewritten links
     return NextResponse.json({ modifiedContent: finalHtmlContent });
   } catch (error) {
-    console.error("Error processing request with Gemini:", error);
+    console.error("Error processing request with Groq:", error);
     let errorMessage = "Internal server error during AI processing";
     let errorDetails = "";
     if (error instanceof Error) {
